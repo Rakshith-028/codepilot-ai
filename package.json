@@ -4,6 +4,10 @@
   "description": "Local AI coding assistant for VS Code with project-aware RAG, error detection, safe fixes, and code understanding.",
   "version": "1.0.0",
   "publisher": "rakshith",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Rakshith-028/codepilot-ai.git"
+  },
   "engines": {
     "vscode": "^1.125.0"
   },
