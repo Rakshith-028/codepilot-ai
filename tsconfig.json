@@ -1,10 +1,13 @@
 {
     "compilerOptions": {
-        "module": "Node16",
+        "module": "ESNext",
+        "moduleResolution": "Bundler",
         "target": "ES2022",
+        "skipLibCheck": true,
         "lib": [
-            "ES2022"
+            "ES2022","DOM"
         ],
+
         "types": [
             "node",
             "mocha"
