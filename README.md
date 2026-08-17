@@ -30,6 +30,20 @@ Clickable source files that open directly in VS Code
 
 Automatic VS Code error detection
 
+Screenshots
+
+Project-Aware AI Chat
+
+CodePilot can answer questions using the current project context and show the relevant source files.
+
+![CodePilot AI Chat](images/codepilot-chat.png)
+
+Error Detection and AI Fixes
+
+CodePilot detects VS Code diagnostics, generates a proposed fix, and lets the user review it before applying changes.
+
+![CodePilot AI Fix](images/codepilot-fix.png)
+
 Explain Error
 
 Generate Fix with preview
