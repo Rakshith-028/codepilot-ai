@@ -1,5 +1,7 @@
 CodePilot AI
 
+🌐 Live Website: https://codepilot-website.vercel.app
+
 CodePilot AI is a VS Code extension that brings a local AI coding assistant directly into the editor.
 
 It can explain code, detect errors from VS Code diagnostics, generate fixes, answer questions about the current project, and use RAG to understand files across the workspace. The current version runs with local Ollama models, so no paid API is required.
