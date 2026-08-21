@@ -2,7 +2,7 @@
   "name": "codepilot-ai",
   "displayName": "CodePilot AI",
   "description": "Local AI coding assistant for VS Code with project-aware RAG, error detection, safe fixes, and code understanding.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "rakshith",
   "repository": {
     "type": "git",
