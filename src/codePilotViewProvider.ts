@@ -973,6 +973,283 @@ Be concise.
                     const errorLine =
                         errorPosition.line;
 
+                    // --------------------------------------------------
+                    // DETERMINISTIC SINGLE-FIX FOR EXPLICIT MISSING BRACE
+                    // --------------------------------------------------
+                    // For an explicit "'}' expected" diagnostic, use a minimal
+                    // insertion edit instead of replacing an entire function.
+                    // This prevents unrelated code (for example the next function
+                    // declaration) from being rewritten or corrupted.
+                    if (/['"]?}['"]?\s*expected/i.test(error)) {
+
+                        const braceStack: {
+                            line: number;
+                            character: number;
+                        }[] = [];
+
+                        let inSingleQuote = false;
+                        let inDoubleQuote = false;
+                        let inTemplate = false;
+                        let inBlockComment = false;
+                        let escaped = false;
+
+                        for (
+                            let lineIndex = 0;
+                            lineIndex <= Math.min(
+                                errorLine,
+                                document.lineCount - 1
+                            );
+                            lineIndex++
+                        ) {
+
+                            const lineText =
+                                document.lineAt(lineIndex).text;
+
+                            let inLineComment = false;
+
+                            for (
+                                let characterIndex = 0;
+                                characterIndex < lineText.length;
+                                characterIndex++
+                            ) {
+
+                                const character =
+                                    lineText[characterIndex];
+
+                                const nextCharacter =
+                                    lineText[characterIndex + 1] ?? '';
+
+                                if (inLineComment) {
+                                    break;
+                                }
+
+                                if (inBlockComment) {
+
+                                    if (
+                                        character === '*' &&
+                                        nextCharacter === '/'
+                                    ) {
+                                        inBlockComment = false;
+                                        characterIndex++;
+                                    }
+
+                                    continue;
+                                }
+
+                                if (escaped) {
+                                    escaped = false;
+                                    continue;
+                                }
+
+                                if (inSingleQuote) {
+
+                                    if (character === '\\') {
+                                        escaped = true;
+                                    } else if (character === "'") {
+                                        inSingleQuote = false;
+                                    }
+
+                                    continue;
+                                }
+
+                                if (inDoubleQuote) {
+
+                                    if (character === '\\') {
+                                        escaped = true;
+                                    } else if (character === '"') {
+                                        inDoubleQuote = false;
+                                    }
+
+                                    continue;
+                                }
+
+                                if (inTemplate) {
+
+                                    if (character === '\\') {
+                                        escaped = true;
+                                    } else if (character === '`') {
+                                        inTemplate = false;
+                                    }
+
+                                    continue;
+                                }
+
+                                if (
+                                    character === '/' &&
+                                    nextCharacter === '/'
+                                ) {
+                                    inLineComment = true;
+                                    break;
+                                }
+
+                                if (
+                                    character === '/' &&
+                                    nextCharacter === '*'
+                                ) {
+                                    inBlockComment = true;
+                                    characterIndex++;
+                                    continue;
+                                }
+
+                                if (character === "'") {
+                                    inSingleQuote = true;
+                                    continue;
+                                }
+
+                                if (character === '"') {
+                                    inDoubleQuote = true;
+                                    continue;
+                                }
+
+                                if (character === '`') {
+                                    inTemplate = true;
+                                    continue;
+                                }
+
+                                if (character === '{') {
+
+                                    braceStack.push({
+                                        line: lineIndex,
+                                        character: characterIndex
+                                    });
+
+                                    continue;
+                                }
+
+                                if (character === '}') {
+
+                                    if (braceStack.length > 0) {
+                                        braceStack.pop();
+                                    }
+                                }
+                            }
+                        }
+
+                        const unmatchedBrace =
+                            braceStack[braceStack.length - 1];
+
+                        if (unmatchedBrace) {
+
+                            const openerLineText =
+                                document.lineAt(
+                                    unmatchedBrace.line
+                                ).text;
+
+                            const openerIndentation =
+                                openerLineText.match(/^\s*/)?.[0] ?? '';
+
+                            const indentationWidth = (
+                                value: string
+                            ): number =>
+                                value
+                                    .replace(/\t/g, '    ')
+                                    .length;
+
+                            const openerIndentWidth =
+                                indentationWidth(
+                                    openerIndentation
+                                );
+
+                            let insertionLine =
+                                Math.min(
+                                    errorLine,
+                                    document.lineCount - 1
+                                );
+
+                            const siblingDeclaration =
+                                /^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class)\b/;
+
+                            /*
+                             * With a missing closing brace, the parser may treat
+                             * the following top-level function as nested. Find the
+                             * first later function/class whose visual indentation
+                             * is at the same level (or less) as the unmatched
+                             * opener and close the earlier construct immediately
+                             * before it.
+                             */
+                            for (
+                                let lineIndex =
+                                    unmatchedBrace.line + 1;
+                                lineIndex <=
+                                    Math.min(
+                                        errorLine,
+                                        document.lineCount - 1
+                                    );
+                                lineIndex++
+                            ) {
+
+                                const candidateLine =
+                                    document.lineAt(
+                                        lineIndex
+                                    ).text;
+
+                                const trimmed =
+                                    candidateLine.trimStart();
+
+                                if (!trimmed) {
+                                    continue;
+                                }
+
+                                const candidateIndentation =
+                                    candidateLine.match(/^\s*/)?.[0] ?? '';
+
+                                if (
+                                    siblingDeclaration.test(
+                                        trimmed
+                                    ) &&
+                                    indentationWidth(
+                                        candidateIndentation
+                                    ) <= openerIndentWidth
+                                ) {
+                                    insertionLine =
+                                        lineIndex;
+                                    break;
+                                }
+                            }
+
+                            const insertionPosition =
+                                new vscode.Position(
+                                    insertionLine,
+                                    0
+                                );
+
+                            const insertionRange =
+                                new vscode.Range(
+                                    insertionPosition,
+                                    insertionPosition
+                                );
+
+                            const insertionText =
+                                openerIndentation +
+                                '}' +
+                                '\n';
+
+                            this.latestProposedFixRange =
+                                insertionRange;
+
+                            this.latestProposedFixUri =
+                                uri;
+
+                            /*
+                             * An insertion range contains no original text.
+                             * Keep the empty string so stale-code protection can
+                             * still compare the exact range before applying.
+                             */
+                            this.latestProposedOriginalText =
+                                '';
+
+                            this.latestProposedFix =
+                                insertionText;
+
+                            webviewView.webview.postMessage({
+                                command: 'fixReady',
+                                text: insertionText
+                            });
+
+                            return;
+                        }
+                    }
+
                     // Default safest target:
                     // replace only the exact diagnostic line.
                     let repairRange =
@@ -1212,7 +1489,7 @@ Rules:
 
                         // Ollama may sometimes return escaped line breaks
                         // as literal "\n" text. Convert those before validation.
-                        const cleanFix =
+                        let cleanFix =
                             parsed.fix
                                 .replace(/\\r\\n/g, '\n')
                                 .replace(/\\n/g, '\n')
@@ -1425,19 +1702,226 @@ Rules:
                                 )
                             );
 
-                        // Give the model a little context above/below the
-                        // diagnostic cluster, but keep the edit bounded.
-                        const startLine =
+                        // --------------------------------------------------
+                        // STRUCTURAL CONTEXT FOR HIDDEN MISSING CLOSERS
+                        // --------------------------------------------------
+                        // A parser often reports a missing closing brace at the
+                        // END of the file even though the matching opening brace
+                        // is much higher up. If Fix All only sends 20 lines around
+                        // the diagnostic, the model never sees the real opening
+                        // token and can place the closer in the wrong location.
+                        //
+                        // Scan the document up to the last diagnostic and locate
+                        // the most recent unmatched opening token that corresponds
+                        // to an explicit "expected" diagnostic. Strings/comments
+                        // are ignored so braces inside text do not confuse the scan.
+                        const findStructuralOpeningLine = (): number | undefined => {
+
+                            const neededOpeners =
+                                new Set<string>();
+
+                            for (const diagnostic of diagnostics) {
+
+                                const message =
+                                    diagnostic.message;
+
+                                if (/['"]?}['"]?\s*expected/i.test(message)) {
+                                    neededOpeners.add('{');
+                                }
+
+                                if (/['"]?\)['"]?\s*expected/i.test(message)) {
+                                    neededOpeners.add('(');
+                                }
+
+                                if (/['"]?\]['"]?\s*expected/i.test(message)) {
+                                    neededOpeners.add('[');
+                                }
+                            }
+
+                            if (neededOpeners.size === 0) {
+                                return undefined;
+                            }
+
+                            const stacks: Record<string, number[]> = {
+                                '{': [],
+                                '(': [],
+                                '[': []
+                            };
+
+                            let inSingleQuote = false;
+                            let inDoubleQuote = false;
+                            let inTemplate = false;
+                            let inBlockComment = false;
+                            let escaped = false;
+
+                            const maxLine =
+                                Math.min(
+                                    lastErrorLine,
+                                    document.lineCount - 1
+                                );
+
+                            for (let lineIndex = 0; lineIndex <= maxLine; lineIndex++) {
+
+                                const line =
+                                    document.lineAt(lineIndex).text;
+
+                                let inLineComment = false;
+
+                                for (let characterIndex = 0; characterIndex < line.length; characterIndex++) {
+
+                                    const character =
+                                        line[characterIndex];
+
+                                    const nextCharacter =
+                                        line[characterIndex + 1] ?? '';
+
+                                    if (inLineComment) {
+                                        break;
+                                    }
+
+                                    if (inBlockComment) {
+                                        if (character === '*' && nextCharacter === '/') {
+                                            inBlockComment = false;
+                                            characterIndex++;
+                                        }
+                                        continue;
+                                    }
+
+                                    if (escaped) {
+                                        escaped = false;
+                                        continue;
+                                    }
+
+                                    if (inSingleQuote) {
+                                        if (character === '\\') {
+                                            escaped = true;
+                                        } else if (character === "'") {
+                                            inSingleQuote = false;
+                                        }
+                                        continue;
+                                    }
+
+                                    if (inDoubleQuote) {
+                                        if (character === '\\') {
+                                            escaped = true;
+                                        } else if (character === '"') {
+                                            inDoubleQuote = false;
+                                        }
+                                        continue;
+                                    }
+
+                                    if (inTemplate) {
+                                        if (character === '\\') {
+                                            escaped = true;
+                                        } else if (character === '`') {
+                                            inTemplate = false;
+                                        }
+                                        continue;
+                                    }
+
+                                    if (character === '/' && nextCharacter === '/') {
+                                        inLineComment = true;
+                                        break;
+                                    }
+
+                                    if (character === '/' && nextCharacter === '*') {
+                                        inBlockComment = true;
+                                        characterIndex++;
+                                        continue;
+                                    }
+
+                                    if (character === "'") {
+                                        inSingleQuote = true;
+                                        continue;
+                                    }
+
+                                    if (character === '"') {
+                                        inDoubleQuote = true;
+                                        continue;
+                                    }
+
+                                    if (character === '`') {
+                                        inTemplate = true;
+                                        continue;
+                                    }
+
+                                    if (character === '{' || character === '(' || character === '[') {
+                                        stacks[character].push(lineIndex);
+                                        continue;
+                                    }
+
+                                    if (character === '}') {
+                                        stacks['{'].pop();
+                                        continue;
+                                    }
+
+                                    if (character === ')') {
+                                        stacks['('].pop();
+                                        continue;
+                                    }
+
+                                    if (character === ']') {
+                                        stacks['['].pop();
+                                    }
+                                }
+                            }
+
+                            const candidates: number[] = [];
+
+                            for (const opener of neededOpeners) {
+
+                                const stack =
+                                    stacks[opener];
+
+                                if (stack.length > 0) {
+                                    candidates.push(
+                                        stack[stack.length - 1]
+                                    );
+                                }
+                            }
+
+                            if (candidates.length === 0) {
+                                return undefined;
+                            }
+
+                            return Math.min(...candidates);
+                        };
+
+                        const structuralOpeningLine =
+                            findStructuralOpeningLine();
+
+                        // Small files can still be analyzed as a whole. For larger
+                        // files, start from the actual unmatched opening token when
+                        // one is found; otherwise fall back to the diagnostic window.
+                        const useWholeFile =
+                            document.lineCount <= 120;
+
+                        const defaultStartLine =
                             Math.max(
                                 0,
-                                firstErrorLine - 2
+                                firstErrorLine - 20
                             );
 
+                        const startLine =
+                            useWholeFile
+                                ? 0
+                                : structuralOpeningLine !== undefined
+                                    ? Math.max(
+                                        0,
+                                        Math.min(
+                                            defaultStartLine,
+                                            structuralOpeningLine - 2
+                                        )
+                                    )
+                                    : defaultStartLine;
+
                         const endLine =
-                            Math.min(
-                                document.lineCount - 1,
-                                lastErrorLine + 2
-                            );
+                            useWholeFile
+                                ? document.lineCount - 1
+                                : Math.min(
+                                    document.lineCount - 1,
+                                    lastErrorLine + 20
+                                );
 
                         const combinedRange =
                             new vscode.Range(
@@ -1467,6 +1951,35 @@ Rules:
                                 )
                                 .join('\n');
 
+
+                        const structuralHints =
+                            diagnostics
+                                .map(diagnostic => {
+
+                                    const message =
+                                        diagnostic.message;
+
+                                    if (/['"]?}['"]?\s*expected/i.test(message)) {
+                                        return '- MANDATORY: a closing } is expected. Add the missing closing brace at the structurally correct location.';
+                                    }
+
+                                    if (/['"]?\)['"]?\s*expected/i.test(message)) {
+                                        return '- MANDATORY: a closing ) is expected. Add the missing closing parenthesis at the structurally correct location.';
+                                    }
+
+                                    if (/['"]?\]['"]?\s*expected/i.test(message)) {
+                                        return '- MANDATORY: a closing ] is expected. Add the missing closing bracket at the structurally correct location.';
+                                    }
+
+                                    if (/['"]?;['"]?\s*expected/i.test(message)) {
+                                        return '- MANDATORY: a semicolon is expected. Add it where required without changing unrelated logic.';
+                                    }
+
+                                    return '';
+                                })
+                                .filter(Boolean)
+                                .join('\n');
+
                         const response =
                             await fetch(
                                 'http://localhost:11434/api/generate',
@@ -1490,6 +2003,14 @@ The active file has these VS Code diagnostics:
 
 ${diagnosticText}
 
+MANDATORY STRUCTURAL REQUIREMENTS:
+${structuralHints || '- Resolve every listed diagnostic and verify delimiter balance.'}
+
+STRUCTURAL ANCHOR:
+${structuralOpeningLine !== undefined
+    ? `An unmatched opening delimiter was detected near original file line ${structuralOpeningLine + 1}. Inspect from that opening construct and place the missing closer where that construct should actually end.`
+    : 'No reliable unmatched opening delimiter was found; use the supplied code structure and diagnostics.'}
+
 CODE BLOCK CONTAINING THE ERROR CLUSTER:
 
 ${originalBlock}
@@ -1497,13 +2018,24 @@ ${originalBlock}
 Return the corrected version of the ENTIRE CODE BLOCK above.
 
 Important:
+- EVERY listed diagnostic must be addressed in the returned code.
+- If a diagnostic explicitly says a token such as }, ), ], or ; is expected, the corrected code MUST contain that missing token at the structurally correct location.
 - Fix the root syntax/programming mistakes that cause these diagnostics.
+- Do NOT limit yourself only to the diagnostics currently reported by VS Code.
+- One syntax error may hide another until the first error is corrected.
+- Inspect the supplied block for directly related syntax problems.
+- Explicitly check matching (), {}, and [] pairs.
+- Check missing/extra semicolons, commas, quotes, parentheses, braces, and brackets.
+- Check malformed if/for/while/function declarations and incomplete statements.
+- If the block includes the end of a function/class/file, verify that opened blocks are properly closed.
 - Some diagnostics may be cascading errors caused by one earlier mistake.
 - Preserve all unrelated valid code in this block.
+- Preserve the user's original logic.
 - Do not remove valid braces, functions, statements, or lines.
-- Do not add code from outside this block.
-- Keep the same overall structure and logic unless a change is required to fix an error.
+- Do not add unrelated functionality.
+- Keep the same overall structure unless a change is required to make the code valid.
 - Return the COMPLETE corrected block, not only the changed lines.
+- Before answering, silently re-check the corrected block for unmatched delimiters.
 - Do not add explanations.
 - Do not use markdown code fences.
 - Return only the corrected block inside the JSON field "fix".
@@ -1534,7 +2066,7 @@ Important:
                                                     0,
 
                                                 num_predict:
-                                                    700
+                                                    1000
                                             }
                                         })
                                 }
@@ -1559,7 +2091,7 @@ Important:
                                 fix: string;
                             };
 
-                        const cleanFix =
+                        let cleanFix =
                             parsed.fix
                                 .replace(/\\r\\n/g, '\n')
                                 .replace(/\\n/g, '\n')
@@ -1571,6 +2103,272 @@ Important:
                                 'AI returned an empty Fix All preview.'
                             );
                         }
+
+                        const hasStructuralDiagnostic =
+                            diagnostics.some(
+                                diagnostic =>
+                                    /expected|unterminated|unmatched|unexpected end/i.test(
+                                        diagnostic.message
+                                    )
+                            );
+
+                        if (hasStructuralDiagnostic) {
+
+                            const verificationResponse =
+                                await fetch(
+                                    'http://localhost:11434/api/generate',
+                                    {
+                                        method: 'POST',
+
+                                        headers: {
+                                            'Content-Type':
+                                                'application/json'
+                                        },
+
+                                        body:
+                                            JSON.stringify({
+                                                model:
+                                                    'qwen3:4b',
+
+                                                prompt: `
+You are the final syntax verifier for CodePilot AI.
+
+ORIGINAL VS CODE DIAGNOSTICS:
+${diagnosticText}
+
+MANDATORY STRUCTURAL REQUIREMENTS:
+${structuralHints || '- Resolve every listed syntax diagnostic.'}
+
+STRUCTURAL ANCHOR:
+${structuralOpeningLine !== undefined
+    ? `The original source has an unmatched opening delimiter near file line ${structuralOpeningLine + 1}. Make sure the candidate closes that specific construct at its natural boundary, not merely at the diagnostic line.`
+    : 'Use the candidate structure and diagnostics to place missing closers correctly.'}
+
+CANDIDATE FIX:
+${cleanFix}
+
+Return a final corrected version of the COMPLETE candidate block.
+
+Rules:
+- Do not merely review it; CORRECT it if any listed diagnostic is still not addressed.
+- Treat messages such as "'}' expected", "')' expected", "']' expected", or "';' expected" as mandatory repair requirements.
+- Verify balanced (), {}, and [] delimiters.
+- Verify incomplete function/if/for/while blocks are properly closed.
+- Preserve unrelated valid code and original logic.
+- Do not add explanations.
+- Do not use markdown code fences.
+- Return only the final corrected block inside the JSON field "fix".
+`,
+
+                                                stream: false,
+
+                                                think: false,
+
+                                                format: {
+                                                    type:
+                                                        'object',
+
+                                                    properties: {
+                                                        fix: {
+                                                            type:
+                                                                'string'
+                                                        }
+                                                    },
+
+                                                    required: [
+                                                        'fix'
+                                                    ]
+                                                },
+
+                                                options: {
+                                                    temperature:
+                                                        0,
+
+                                                    num_predict:
+                                                        1000
+                                                }
+                                            })
+                                    }
+                                );
+
+                            if (verificationResponse.ok) {
+
+                                const verificationData =
+                                    await verificationResponse.json() as {
+                                        response: string;
+                                    };
+
+                                const verificationParsed =
+                                    JSON.parse(
+                                        verificationData.response
+                                    ) as {
+                                        fix: string;
+                                    };
+
+                                const verifiedFix =
+                                    verificationParsed.fix
+                                        .replace(/\\r\\n/g, '\n')
+                                        .replace(/\\n/g, '\n')
+                                        .trimEnd();
+
+                                if (verifiedFix.trim()) {
+                                    cleanFix = verifiedFix;
+                                }
+                            }
+                        }
+
+                        // --------------------------------------------------
+                        // DETERMINISTIC FALLBACK FOR EXPLICIT MISSING CLOSERS
+                        // --------------------------------------------------
+                        // Small local models can occasionally acknowledge a
+                        // diagnostic such as "'}' expected" or "')' expected"
+                        // but still forget to insert the token. When VS Code has
+                        // explicitly reported the missing closer, enforce that
+                        // one token deterministically instead of trusting the
+                        // model a third time.
+                        const enforceExpectedClosers = (
+                            candidate: string
+                        ): string => {
+
+                            const lines =
+                                candidate.split('\n');
+
+                            const countToken = (
+                                source: string,
+                                token: string
+                            ): number =>
+                                source.split(token).length - 1;
+
+                            for (const diagnostic of diagnostics) {
+
+                                const message =
+                                    diagnostic.message;
+
+                                let token = '';
+
+                                if (/['"]?}['"]?\s*expected/i.test(message)) {
+                                    token = '}';
+                                } else if (/['"]?\)['"]?\s*expected/i.test(message)) {
+                                    token = ')';
+                                } else if (/['"]?\]['"]?\s*expected/i.test(message)) {
+                                    token = ']';
+                                }
+
+                                if (!token) {
+                                    continue;
+                                }
+
+                                // If the AI already inserted the missing token,
+                                // do not insert a duplicate.
+                                if (
+                                    countToken(candidate, token) >
+                                    countToken(originalBlock, token)
+                                ) {
+                                    continue;
+                                }
+
+                                const localLine =
+                                    Math.max(
+                                        0,
+                                        Math.min(
+                                            lines.length - 1,
+                                            diagnostic.range.start.line -
+                                                startLine
+                                        )
+                                    );
+
+                                if (token === '}') {
+
+                                    let insertionLine =
+                                        localLine;
+
+                                    // If we located the unmatched opening brace,
+                                    // prefer closing it immediately before the next
+                                    // sibling declaration at the same indentation.
+                                    // Example:
+                                    // function addComment() { ...
+                                    // function deleteComment() { ...
+                                    // The missing } belongs BEFORE deleteComment,
+                                    // not at the EOF diagnostic line.
+                                    if (
+                                        structuralOpeningLine !== undefined &&
+                                        structuralOpeningLine >= startLine &&
+                                        structuralOpeningLine <= endLine
+                                    ) {
+
+                                        const openerLocalLine =
+                                            structuralOpeningLine - startLine;
+
+                                        const openerText =
+                                            lines[openerLocalLine] ?? '';
+
+                                        const openerIndentation =
+                                            openerText.match(/^\s*/)?.[0] ?? '';
+
+                                        const siblingDeclaration =
+                                            /^(?:export\s+)?(?:async\s+)?(?:function|class|interface|enum|namespace)\b/;
+
+                                        for (let index = openerLocalLine + 1; index < lines.length; index++) {
+
+                                            const candidateLine =
+                                                lines[index] ?? '';
+
+                                            const candidateIndentation =
+                                                candidateLine.match(/^\s*/)?.[0] ?? '';
+
+                                            if (
+                                                candidateIndentation === openerIndentation &&
+                                                siblingDeclaration.test(
+                                                    candidateLine.trimStart()
+                                                )
+                                            ) {
+                                                insertionLine = index;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    const targetLine =
+                                        lines[insertionLine] ?? '';
+
+                                    const indentation =
+                                        targetLine.match(/^\s*/)?.[0] ?? '';
+
+                                    lines.splice(
+                                        insertionLine,
+                                        0,
+                                        `${indentation}}`
+                                    );
+
+                                } else {
+
+                                    const targetLine =
+                                        lines[localLine] ?? '';
+
+                                    const insertAt =
+                                        Math.max(
+                                            0,
+                                            Math.min(
+                                                targetLine.length,
+                                                diagnostic.range.start.character
+                                            )
+                                        );
+
+                                    lines[localLine] =
+                                        targetLine.slice(0, insertAt) +
+                                        token +
+                                        targetLine.slice(insertAt);
+                                }
+
+                                candidate =
+                                    lines.join('\n');
+                            }
+
+                            return candidate;
+                        };
+
+                        cleanFix =
+                            enforceExpectedClosers(cleanFix);
 
                         if (cleanFix === originalBlock) {
 
@@ -1705,6 +2503,46 @@ Important:
 
                         await document.save();
 
+                        webviewView.webview.postMessage({
+                            command: 'aiResponse',
+                            text: '✅ Fixes applied. 🔄 Re-checking diagnostics...'
+                        });
+
+                        // Diagnostics from language extensions refresh
+                        // asynchronously after an edit/save. Poll briefly before
+                        // claiming that every detected error has been resolved.
+                        let remainingErrors: vscode.Diagnostic[] = [];
+
+                        for (
+                            let attempt = 0;
+                            attempt < 5;
+                            attempt++
+                        ) {
+
+                            await new Promise<void>(
+                                resolve =>
+                                    setTimeout(
+                                        resolve,
+                                        400
+                                    )
+                            );
+
+                            remainingErrors =
+                                vscode.languages
+                                    .getDiagnostics(uri)
+                                    .filter(
+                                        diagnostic =>
+                                            diagnostic.severity ===
+                                            vscode.DiagnosticSeverity.Error
+                                    );
+
+                            if (
+                                remainingErrors.length === 0
+                            ) {
+                                break;
+                            }
+                        }
+
                         this.latestFixAllRange =
                             undefined;
 
@@ -1717,10 +2555,32 @@ Important:
                         this.latestFixAllProposedText =
                             undefined;
 
-                        webviewView.webview.postMessage({
-                            command: 'aiResponse',
-                            text: '✅ Fix All applied successfully.'
-                        });
+                        if (
+                            remainingErrors.length === 0
+                        ) {
+
+                            webviewView.webview.postMessage({
+                                command: 'aiResponse',
+                                text: '✅ All detected errors resolved.'
+                            });
+
+                        } else {
+
+                            const remainingSummary =
+                                remainingErrors
+                                    .slice(0, 3)
+                                    .map(
+                                        diagnostic =>
+                                            `Line ${diagnostic.range.start.line + 1}: ${diagnostic.message}`
+                                    )
+                                    .join('\n');
+
+                            webviewView.webview.postMessage({
+                                command: 'aiResponse',
+                                text:
+                                    `⚠️ Fixes applied, but ${remainingErrors.length} error(s) are still detected.\n\n${remainingSummary}\n\nRun Fix All Errors again to resolve the newly exposed issue(s).`
+                            });
+                        }
 
                         webviewView.webview.postMessage({
                             command: 'clearFixAllPreview'
@@ -1759,10 +2619,10 @@ Important:
 
                     const proposedFix =
                         typeof message.fix === 'string'
-                            ? message.fix.trim()
+                            ? message.fix
                             : '';
 
-                    if (!proposedFix) {
+                    if (!proposedFix.trim()) {
 
                         webviewView.webview.postMessage({
                             command: 'aiResponse',
@@ -1799,7 +2659,7 @@ Important:
                             this.latestProposedOriginalText;
 
                         if (
-                            !originalText ||
+                            originalText === undefined ||
                             document.getText(
                                 replacementRange
                             ) !== originalText
@@ -2885,15 +3745,15 @@ applyFixButton.addEventListener(
     () => {
 
         const fix =
-            fixCode.textContent.trim();
+            fixCode.textContent;
 
-        if (!fix) {
+        if (!fix.trim()) {
             return;
         }
 
         vscode.postMessage({
             command: 'applyFix',
-            fix: fix
+            fix
         });
     }
 );
